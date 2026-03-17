@@ -1,0 +1,13 @@
+[project]
+name = "claude-code-remote"
+version = "0.2.0"
+description = "Use Claude Code from your phone via Slack self-DMs"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "slack_sdk>=3.27.0",
+]
+
+[project.scripts]
+claude-code-remote = "claude_code_remote:main"
