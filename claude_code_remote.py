@@ -640,24 +640,31 @@ class ClaudeCodeRemote:
                 return f"{BOT_PREFIX} 📂 Working directory: `{self.working_dir}`"
             return f"{BOT_PREFIX} ❌ Directory not found: `{expanded}`"
 
+        if text_lower.startswith("!send "):
+            file_path = text.strip()[6:].strip()
+            return self._send_file(file_path)
+
+        if text_lower.startswith("!clean"):
+            parts = text_lower.split()
+            keep = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 10
+            return self._clean_thread(keep)
+
+        if text_lower.startswith("!tree"):
+            parts = text.strip().split(maxsplit=1)
+            path = parts[1] if len(parts) > 1 else self.working_dir
+            return self._tree(path)
+
+        if text_lower == "!diff":
+            return self._git_diff()
+
+        if text_lower == "!git":
+            return self._git_status()
+
+        if text_lower == "!menu":
+            return self._menu()
+
         if text_lower == "!help":
-            return textwrap.dedent(f"""\
-                {BOT_PREFIX} *Claude Code Remote — Commands*
-
-                `!help` — Show this help
-                `!status` — Session info (IDs, working dir, message count)
-                `!new` — Fresh Claude session (clear context)
-                `!session <id>` — Resume a specific Claude CLI session
-                `!spawn` — Start a new remote session (new thread)
-                `!cd <path>` — Change working directory
-                `!stop` — Stop the remote listener
-
-                *How it works:*
-                • Your messages → Claude Code CLI on your machine
-                • {BOT_PREFIX} prefixed messages → Claude's responses
-                • Code blocks, long responses auto-split
-                • Session persists across script restarts
-            """)
+            return self._help_text()
 
         return None
 
@@ -672,6 +679,193 @@ class ClaudeCodeRemote:
             🔐 *Permissions:* `{self.permission_mode}`
             ⏱️ *Interval:* {self.check_interval}s
             🕐 *Started:* {self.state.created_at[:19]}
+        """)
+
+    def _send_file(self, file_path: str) -> str:
+        """Upload a file from the local machine to the Slack thread."""
+        expanded = os.path.expanduser(file_path)
+        if not os.path.isabs(expanded):
+            expanded = os.path.join(self.working_dir, expanded)
+
+        if not os.path.isfile(expanded):
+            return f"{BOT_PREFIX} ❌ File not found: `{expanded}`"
+
+        try:
+            self._rate_limit()
+            self.client.files_upload_v2(
+                channel=self.state.channel_id,
+                file=expanded,
+                filename=os.path.basename(expanded),
+                thread_ts=self.state.thread_ts,
+                initial_comment=f"{BOT_PREFIX} 📎 `{os.path.basename(expanded)}`",
+            )
+            return ""  # Empty string = handled, don't post (files_upload_v2 posts its own)
+        except SlackApiError as e:
+            return f"{BOT_PREFIX} ❌ Upload failed: {e.response['error']}"
+
+    def _clean_thread(self, keep: int = 10) -> str:
+        """Delete older messages in the thread, keeping the last N."""
+        try:
+            self._rate_limit()
+            resp = self.client.conversations_replies(
+                channel=self.state.channel_id,
+                ts=self.state.thread_ts,
+                limit=200,
+            )
+            messages = resp.get("messages", [])
+        except SlackApiError as e:
+            return f"{BOT_PREFIX} ❌ Failed to read thread: {e.response['error']}"
+
+        # Never delete the parent message (first in list)
+        deletable = [m for m in messages if m.get("ts") != self.state.thread_ts]
+        if len(deletable) <= keep:
+            return f"{BOT_PREFIX} Thread only has {len(deletable)} messages — nothing to clean."
+
+        to_delete = deletable[:-keep]
+        deleted = 0
+        for msg in to_delete:
+            try:
+                time.sleep(0.3)
+                self.client.chat_delete(
+                    channel=self.state.channel_id, ts=msg["ts"]
+                )
+                deleted += 1
+            except SlackApiError:
+                pass  # Can't delete Slackbot messages etc.
+
+        return (
+            f"{BOT_PREFIX} 🧹 Cleaned {deleted} messages, kept last {keep}.\n"
+            f"Thread now has {len(deletable) - deleted + 1} messages."
+        )
+
+    def _tree(self, path: str, max_depth: int = 3) -> str:
+        """Show directory tree — mobile-friendly view of the codebase."""
+        expanded = os.path.expanduser(path)
+        if not os.path.isabs(expanded):
+            expanded = os.path.join(self.working_dir, expanded)
+
+        if not os.path.isdir(expanded):
+            return f"{BOT_PREFIX} ❌ Directory not found: `{expanded}`"
+
+        try:
+            result = subprocess.run(
+                ["find", expanded, "-maxdepth", str(max_depth), "-type", "f"],
+                capture_output=True, text=True, timeout=10,
+            )
+            files = sorted(result.stdout.strip().split("\n"))[:100]
+
+            # Build a simple tree
+            tree_lines = [f"📂 `{expanded}`\n```"]
+            for f in files:
+                if not f:
+                    continue
+                rel = os.path.relpath(f, expanded)
+                depth = rel.count(os.sep)
+                indent = "  " * depth
+                name = os.path.basename(f)
+                tree_lines.append(f"{indent}├── {name}")
+            tree_lines.append("```")
+
+            output = "\n".join(tree_lines)
+            if len(output) > SLACK_MAX_MESSAGE_LENGTH - 100:
+                output = output[:SLACK_MAX_MESSAGE_LENGTH - 150] + "\n... (truncated)```"
+
+            return f"{BOT_PREFIX} {output}"
+        except Exception as e:
+            return f"{BOT_PREFIX} ❌ Tree failed: {e}"
+
+    def _git_diff(self) -> str:
+        """Show git diff for the working directory."""
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--stat", "HEAD"],
+                capture_output=True, text=True, timeout=10,
+                cwd=self.working_dir,
+            )
+            diff_stat = result.stdout.strip()
+            if not diff_stat:
+                # Try staged
+                result = subprocess.run(
+                    ["git", "diff", "--stat", "--staged"],
+                    capture_output=True, text=True, timeout=10,
+                    cwd=self.working_dir,
+                )
+                diff_stat = result.stdout.strip()
+                if not diff_stat:
+                    return f"{BOT_PREFIX} ✅ No changes — working tree clean."
+                label = "Staged changes"
+            else:
+                label = "Unstaged changes"
+
+            return f"{BOT_PREFIX} 📝 *{label}:*\n```\n{diff_stat[:3500]}\n```"
+        except Exception as e:
+            return f"{BOT_PREFIX} ❌ Git diff failed: {e}"
+
+    def _git_status(self) -> str:
+        """Show git status for the working directory."""
+        try:
+            result = subprocess.run(
+                ["git", "status", "--short", "--branch"],
+                capture_output=True, text=True, timeout=10,
+                cwd=self.working_dir,
+            )
+            status = result.stdout.strip()
+            if not status:
+                return f"{BOT_PREFIX} ✅ Clean working tree."
+            return f"{BOT_PREFIX} 📊 *Git Status:*\n```\n{status[:3500]}\n```"
+        except Exception as e:
+            return f"{BOT_PREFIX} ❌ Git status failed: {e}"
+
+    def _menu(self) -> str:
+        """Mobile-friendly action menu."""
+        return textwrap.dedent(f"""\
+            {BOT_PREFIX} *📱 Quick Actions*
+
+            *Session:*
+            `!status` — Info  •  `!new` — Reset  •  `!stop` — End
+            `!session <id>` — Resume session  •  `!spawn` — New thread
+
+            *Files & Code:*
+            `!tree` — Browse files  •  `!diff` — See changes
+            `!git` — Git status  •  `!send <path>` — Upload file
+            `!cd <path>` — Change directory
+
+            *Housekeeping:*
+            `!clean` — Trim thread (keep 10)  •  `!clean 5` — Keep 5
+
+            _Or just type a message to talk to Claude._
+        """)
+
+    def _help_text(self) -> str:
+        """Full help text with all commands."""
+        return textwrap.dedent(f"""\
+            {BOT_PREFIX} *Claude Code Remote — Commands*
+
+            *Session Management:*
+            `!help` — Show this help
+            `!menu` — Quick action menu (mobile-friendly)
+            `!status` — Session info (IDs, working dir, message count)
+            `!new` — Fresh Claude session (clear context)
+            `!session <id>` — Resume a specific Claude CLI session
+            `!spawn` — Start a new remote session (new thread)
+            `!cd <path>` — Change working directory
+            `!stop` — Stop the remote listener
+
+            *Files & Code:*
+            `!send <path>` — Upload a file to this thread
+            `!tree [path]` — Browse directory structure
+            `!diff` — Show git diff (changed files)
+            `!git` — Show git status
+
+            *Housekeeping:*
+            `!clean [n]` — Delete old messages, keep last n (default 10)
+
+            *How it works:*
+            • Your messages → Claude Code CLI on your machine
+            • {BOT_PREFIX} prefixed messages → Claude's responses
+            • Upload images/files — they're downloaded and passed to Claude
+            • Code blocks, long responses auto-split
+            • Session persists across script restarts
         """)
 
     def _spawn_session(self) -> str:
@@ -934,11 +1128,12 @@ class ClaudeCodeRemote:
             if cmd_response is not None:
                 self._remove_reaction(self.state.channel_id, ts, PROCESSING_EMOJI)
                 self._add_reaction(self.state.channel_id, ts, DONE_EMOJI)
-                self._post_message(
-                    self.state.channel_id,
-                    cmd_response,
-                    thread_ts=self.state.thread_ts,
-                )
+                if cmd_response:  # Empty string = handled silently (e.g. file upload)
+                    self._post_message(
+                        self.state.channel_id,
+                        cmd_response,
+                        thread_ts=self.state.thread_ts,
+                    )
                 self.state.message_count += 1
                 self.state.save()
                 continue
