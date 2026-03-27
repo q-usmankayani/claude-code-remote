@@ -986,12 +986,46 @@ class ClaudeCodeRemote:
             Type `!help` for commands.
         """)
 
+    def _drain_queue(self, first_item: tuple) -> tuple[str, list[str]]:
+        """Drain all pending items from the queue, combining with first_item.
+
+        Returns (combined_prompt, all_msg_timestamps). If only one message
+        was waiting, the prompt is returned as-is. If multiple accumulated,
+        they're combined into a single prompt so Claude processes them in
+        one turn — just like typing follow-ups in a live session.
+        """
+        items = [first_item]
+        while True:
+            try:
+                item = self._prompt_queue.get_nowait()
+                if item is None:  # Shutdown sentinel — put it back
+                    self._prompt_queue.put(None)
+                    break
+                items.append(item)
+                self._prompt_queue.task_done()
+            except queue.Empty:
+                break
+
+        if len(items) == 1:
+            return items[0][0], [items[0][1]]
+
+        # Combine multiple messages into one prompt
+        all_ts = [ts for _, ts in items]
+        parts = [text for text, _ in items]
+        combined = "\n\n---\n\n".join(parts)
+        self.logger.info(f"Absorbed {len(items)} messages into single prompt")
+        return combined, all_ts
+
     def _claude_worker(self):
         """Background worker that processes Claude prompts from the queue.
 
         Runs in a daemon thread. Processes one prompt at a time (Claude CLI
         calls must be sequential for session continuity). Commands (!help etc.)
         are handled inline in the poll loop and never hit this queue.
+
+        When multiple messages accumulate while Claude is busy, they are
+        drained and combined into a single prompt — mimicking how follow-up
+        messages get absorbed in a live Claude Code session.
         """
         while self._running:
             try:
@@ -1002,7 +1036,8 @@ class ClaudeCodeRemote:
             if item is None:  # Shutdown sentinel
                 break
 
-            text, msg_ts = item
+            # Drain any additional queued messages and combine
+            text, all_msg_ts = self._drain_queue(item)
 
             try:
                 # Post placeholder that will be updated live
@@ -1037,26 +1072,28 @@ class ClaudeCodeRemote:
                         thread_ts=self.state.thread_ts,
                     )
 
-                self._remove_reaction(
-                    self.state.channel_id, msg_ts, PROCESSING_EMOJI
-                )
-                self._add_reaction(
-                    self.state.channel_id, msg_ts, DONE_EMOJI
-                )
+                for ts in all_msg_ts:
+                    self._remove_reaction(
+                        self.state.channel_id, ts, PROCESSING_EMOJI
+                    )
+                    self._add_reaction(
+                        self.state.channel_id, ts, DONE_EMOJI
+                    )
             except Exception as e:
-                self._remove_reaction(
-                    self.state.channel_id, msg_ts, PROCESSING_EMOJI
-                )
-                self._add_reaction(
-                    self.state.channel_id, msg_ts, ERROR_EMOJI
-                )
+                for ts in all_msg_ts:
+                    self._remove_reaction(
+                        self.state.channel_id, ts, PROCESSING_EMOJI
+                    )
+                    self._add_reaction(
+                        self.state.channel_id, ts, ERROR_EMOJI
+                    )
                 self._post_message(
                     self.state.channel_id,
                     f"{BOT_PREFIX} ❌ Error: ```{e}```",
                     thread_ts=self.state.thread_ts,
                 )
 
-            self.state.message_count += 1
+            self.state.message_count += len(all_msg_ts)
             self.state.save()
             self._prompt_queue.task_done()
 
@@ -1138,15 +1175,10 @@ class ClaudeCodeRemote:
                 self.state.save()
                 continue
 
-            # Queue the prompt for the Claude worker thread
-            # This returns immediately so the poll loop keeps running
-            queue_size = self._prompt_queue.qsize()
-            if queue_size > 0:
-                self._post_message(
-                    self.state.channel_id,
-                    f"{BOT_PREFIX} _queued ({queue_size} ahead)..._",
-                    thread_ts=self.state.thread_ts,
-                )
+            # Queue the prompt for the Claude worker thread.
+            # Returns immediately so the poll loop keeps running.
+            # If Claude is busy, this message will be absorbed into
+            # the next prompt alongside any others that accumulate.
             self._prompt_queue.put((text, ts))
 
 
