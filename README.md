@@ -8,7 +8,7 @@ Use Claude Code from your phone, tablet, or any device with Slack.
 
 If you have Claude Code and a Slack MCP server already configured, paste this prompt into Claude Code and it will set everything up for you:
 
-> Clone https://github.com/q-usmankayani/claude-code-remote to ~/claude-code-remote and set it up. Find my Slack MCP xoxc and xoxd tokens from my existing MCP config (check ~/.claude/settings.json, ~/.claude.json, .mcp.json, or any mcp config files for a slack MCP server entry — the tokens will be in the env or args, or sourced from ~/.zshrc via a wrapper script). Add SLACK_MCP_XOXC_TOKEN and SLACK_MCP_XOXD_TOKEN exports to my ~/.zshrc if they're not already there. Install requirements with uv pip install -r requirements.txt. Add a shell function to ~/.zshrc so I can type claude-remote from any directory to launch it (it should pass the current working directory as -w and forward all arguments). Then source ~/.zshrc.
+> Clone https://github.com/q-usmankayani/claude-code-remote to ~/claude-code-remote and set it up. Find my Slack MCP xoxc and xoxd tokens from my existing MCP config (check ~/.claude/settings.json, ~/.claude.json, .mcp.json, or any mcp config files for a slack MCP server entry - the tokens will be in the env or args, or sourced from ~/.zshrc via a wrapper script). Add SLACK_MCP_XOXC_TOKEN and SLACK_MCP_XOXD_TOKEN exports to my ~/.zshrc if they're not already there. Install requirements with uv pip install -r requirements.txt. Add a shell function to ~/.zshrc so I can type claude-remote from any directory to launch it (it should pass the current working directory as -w and forward all arguments). Then source ~/.zshrc.
 
 After setup, start a session from any project directory:
 
@@ -35,29 +35,30 @@ Your Phone/Tablet (Slack)          Your Laptop
 └─────────────────────┘           └──────────────────────┘
 ```
 
-Because it runs against your local CLI, Claude has full access to your codebase, MCP servers, plugins, and all the tools you'd normally use — you just interact via Slack instead of the terminal.
+Because it runs against your local CLI, Claude has full access to your codebase, MCP servers, plugins, and all the tools you'd normally use - you just interact via Slack instead of the terminal.
 
 ## Features
 
-- **Live streaming** — watch Claude thinking in real-time as responses stream to Slack
-- **Session persistence** — sessions survive script restarts, pick up where you left off
-- **Non-blocking** — send commands while Claude is still processing
-- **Message splitting** — long responses automatically split at code block boundaries
-- **File & image support** — upload images or files in the thread, Claude reads them automatically
-- **Built-in commands** — `!help`, `!status`, `!new`, `!cd`, `!stop`
-- **Sleep prevention** — automatically prevents macOS from sleeping while running (via `caffeinate`)
-- **Cleanup tools** — `--clean` and `--clean-all` to delete old session threads
+- **Live streaming** - watch Claude thinking in real-time as responses stream to Slack
+- **Session persistence** - sessions survive script restarts, pick up where you left off
+- **Non-blocking** - send commands while Claude is still processing
+- **Message splitting** - long responses automatically split at code block boundaries
+- **File & image support** - upload images or files in the thread, Claude reads them automatically
+- **Built-in commands** - `!help`, `!status`, `!new`, `!model`, `!cd`, `!stop`
+- **Runtime model switching** - `!model sonnet` / `!model opus` mid-conversation
+- **Sleep prevention** - automatically prevents macOS from sleeping while running (via `caffeinate`)
+- **Cleanup tools** - `--clean` and `--clean-all` to delete old session threads
 
 ## Platform Support
 
-- **macOS** — fully tested, includes automatic sleep prevention via `caffeinate`
-- **Linux** — should work out of the box (caffeinate silently skipped)
-- **Windows (WSL)** — should work under WSL with Claude Code installed
+- **macOS** - fully tested, includes automatic sleep prevention via `caffeinate`
+- **Linux** - should work out of the box (caffeinate silently skipped)
+- **Windows (WSL)** - should work under WSL with Claude Code installed
 
 ## Prerequisites
 
 1. **Claude Code CLI** installed and authenticated (`claude` command available)
-2. **Slack user tokens** — your personal `xoxc` and `xoxd` tokens (the same ones your Slack MCP server uses)
+2. **Slack user tokens** - your personal `xoxc` and `xoxd` tokens (the same ones your Slack MCP server uses)
 3. **Python 3.10+**
 
 ## Installation
@@ -119,7 +120,7 @@ python claude_code_remote.py
 # Specify a working directory
 python claude_code_remote.py -w ~/projects/my-app
 
-# Use a different model (default: claude-opus-4-6)
+# Use a different model (default: claude-opus-4-8). Or switch at runtime with !model.
 python claude_code_remote.py --model sonnet
 
 # Poll every 5 seconds instead of 3
@@ -143,13 +144,13 @@ python claude_code_remote.py --clean-all
 
 ## File & Image Uploads
 
-Upload files directly in the Slack thread — the script downloads them via Slack's API and passes the local paths to Claude Code. Claude can then read and analyse them using its built-in tools.
+Upload files directly in the Slack thread - the script downloads them via Slack's API and passes the local paths to Claude Code. Claude can then read and analyse them using its built-in tools.
 
 **Supported:**
-- **Images** (`.png`, `.jpg`, `.gif`, `.webp`, `.svg`) — Claude reads them natively (multimodal)
-- **Code files** — `.py`, `.js`, `.ts`, `.scala`, `.json`, `.yaml`, etc.
-- **Documents** — `.csv`, `.txt`, `.md`, `.log`, etc.
-- **Any file** — saved locally and path passed to Claude
+- **Images** (`.png`, `.jpg`, `.gif`, `.webp`, `.svg`) - Claude reads them natively (multimodal)
+- **Code files** - `.py`, `.js`, `.ts`, `.scala`, `.json`, `.yaml`, etc.
+- **Documents** - `.csv`, `.txt`, `.md`, `.log`, etc.
+- **Any file** - saved locally and path passed to Claude
 
 Upload with a message for context, or upload without text and Claude will analyse automatically.
 
@@ -166,6 +167,8 @@ Type these in the Slack thread:
 | `!new` | Fresh Claude session (clears context) |
 | `!session <id>` | Resume a specific Claude CLI session by ID |
 | `!spawn` | Start a new remote session (new thread, background process) |
+| `!model` | Show the current model + how to switch |
+| `!model <name>` | Switch model mid-conversation - alias (`opus`/`sonnet`/`haiku`) or full id (`claude-sonnet-5`). Applies to your next message and persists across restarts |
 | `!cd <path>` | Change working directory |
 | `!stop` | Stop the remote listener |
 
@@ -192,9 +195,9 @@ poll Slack every 3s                  wait on queue
 ```
 
 - **Commands** (`!help`, `!status`, etc.) are handled inline and never block
-- **Claude prompts** are queued — you can send multiple while one is processing
-- **Session continuity** — uses `--resume <session-id>` so Claude remembers context
-- **Stream JSON** — parses Claude's `stream-json` output format for live updates
+- **Claude prompts** are queued - you can send multiple while one is processing
+- **Session continuity** - uses `--resume <session-id>` so Claude remembers context
+- **Stream JSON** - parses Claude's `stream-json` output format for live updates
 
 ## Session State
 
@@ -205,7 +208,7 @@ Sessions are stored in `~/.claude/remote-sessions/` as JSON files. Each session 
 - Processed message timestamps (prevents re-processing)
 - Working directory and message count
 
-## Security — "Doesn't this let Slack control your machine?"
+## Security - "Doesn't this let Slack control your machine?"
 
 This is a fair question, but the security boundary here is **no different from using the Slack MCP inside Claude Code**.
 
@@ -214,24 +217,24 @@ If you already have a Slack MCP server configured, Claude Code can already:
 2. Process the message as a prompt within the current session
 3. Post the response back (`conversations_add_message`)
 
-That's functionally identical to what this script does — just implemented as a standalone process rather than a plugin loop. The Slack MCP isn't sandboxed from Claude Code's other capabilities; it's another tool Claude can use alongside Bash, file editing, etc. **The security boundary is the same in both cases: whoever has access to your Slack thread can influence what Claude Code does on your machine.**
+That's functionally identical to what this script does - just implemented as a standalone process rather than a plugin loop. The Slack MCP isn't sandboxed from Claude Code's other capabilities; it's another tool Claude can use alongside Bash, file editing, etc. **The security boundary is the same in both cases: whoever has access to your Slack thread can influence what Claude Code does on your machine.**
 
 ### Why a standalone script instead of a plugin?
 
 | | Plugin/Skill approach | This script |
 |---|---|---|
-| **Reliability** | Depends on Claude maintaining a polling loop — can break on context compaction or session loss | Independent process with its own event loop — runs until you stop it |
+| **Reliability** | Depends on Claude maintaining a polling loop - can break on context compaction or session loss | Independent process with its own event loop - runs until you stop it |
 | **Session persistence** | Lost when the Claude Code session ends | Survives script restarts, resumes where it left off |
 | **Streaming** | No live streaming to Slack | Real-time streaming with periodic Slack updates |
 | **Sleep prevention** | Not possible from within Claude Code | Built-in `caffeinate` support on macOS |
-| **Concurrency** | Blocks the Claude Code session | Non-blocking — send commands while Claude is processing |
+| **Concurrency** | Blocks the Claude Code session | Non-blocking - send commands while Claude is processing |
 | **Setup** | Simpler (no extra process) | Requires running a script on your machine |
 
 In short: the plugin approach is simpler but fragile. This script is the robust version of the same idea.
 
 ### Why not use Claude Code's built-in Remote Control?
 
-Claude Code already has a built-in [Remote Control](https://code.claude.com/docs/en/remote-control) feature that does exactly this — continue local sessions from your phone, tablet, or any browser via `claude.ai/code` or the Claude mobile app.
+Claude Code already has a built-in [Remote Control](https://code.claude.com/docs/en/remote-control) feature that does exactly this - continue local sessions from your phone, tablet, or any browser via `claude.ai/code` or the Claude mobile app.
 
 However, **Remote Control requires a direct Anthropic subscription**. If your organisation uses Claude Code via **Vertex AI** (Google Cloud) or **AWS Bedrock** rather than paying Anthropic directly, the Remote Control feature is not available to you. This project exists as a workaround that gives Vertex AI and Bedrock users the same remote capability via Slack.
 
