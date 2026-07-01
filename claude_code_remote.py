@@ -53,7 +53,51 @@ from slack_sdk.errors import SlackApiError
 SLACK_MAX_MESSAGE_LENGTH = 3900
 STATE_DIR = Path.home() / ".claude" / "remote-sessions"
 FILES_DIR = Path.home() / ".claude" / "remote-files"
-CLAUDE_CLI = "claude"
+
+
+def _resolve_claude_cli() -> str:
+    """Resolve the claude CLI binary, preferring the up-to-date native install.
+
+    ``~/.local/bin/claude`` is a symlink into ``~/.local/share/claude/versions/``
+    that tracks the latest release, so pinning to it (rather than a bare PATH
+    lookup that can resolve a stale shim) keeps remote sessions on the newest
+    CLI — the same fix applied to even-terminal. Override with CLAUDE_REMOTE_BIN;
+    falls back to a PATH lookup for ``claude`` if the preferred path is missing.
+    """
+    override = os.environ.get("CLAUDE_REMOTE_BIN")
+    if override:
+        expanded = os.path.expanduser(override)
+        if os.path.exists(expanded):
+            return expanded
+    default = os.path.expanduser("~/.local/bin/claude")
+    if os.path.exists(default):
+        return default
+    return "claude"  # last resort: resolve via PATH
+
+
+CLAUDE_CLI = _resolve_claude_cli()
+
+# Model defaults + friendly aliases. Full ids match the models provisioned on the
+# Vertex project (q-ai-access-usmankayani). The --model *flag* overrides
+# settings.json's ANTHROPIC_MODEL, and per-model region auto-routes from the
+# VERTEX_REGION_CLAUDE_* vars in settings.json — so switching model "just works"
+# without any manual region handling here.
+DEFAULT_MODEL = "claude-opus-4-8"
+DEFAULT_EFFORT = "max"
+MODEL_ALIASES = {
+    "opus": "claude-opus-4-8",
+    "sonnet": "claude-sonnet-5",
+    "haiku": "claude-haiku-4-5",
+}
+KNOWN_MODELS = [
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-5",
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-5",
+    "claude-haiku-4-5",
+]
 
 # Emoji prefix so Claude replies are visually distinct from your messages
 BOT_PREFIX = "🤖"
@@ -146,6 +190,8 @@ class SessionState:
         self.message_count: int = 0
         self.created_at: str = datetime.now(timezone.utc).isoformat()
         self.working_dir: Optional[str] = None
+        self.model: Optional[str] = None
+        self.effort: Optional[str] = None
         self.load()
 
     def load(self):
@@ -158,6 +204,8 @@ class SessionState:
             self.message_count = data.get("message_count", 0)
             self.created_at = data.get("created_at", self.created_at)
             self.working_dir = data.get("working_dir")
+            self.model = data.get("model")
+            self.effort = data.get("effort")
 
     def save(self):
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -172,6 +220,8 @@ class SessionState:
                     "message_count": self.message_count,
                     "created_at": self.created_at,
                     "working_dir": self.working_dir,
+                    "model": self.model,
+                    "effort": self.effort,
                 },
                 indent=2,
             )
@@ -201,6 +251,7 @@ class ClaudeCodeRemote:
         debug: bool = False,
         permission_mode: str = "default",
         model: Optional[str] = None,
+        effort: Optional[str] = None,
     ):
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         self.logger = setup_logging(debug)
@@ -208,7 +259,6 @@ class ClaudeCodeRemote:
         self.check_interval = check_interval
         self.working_dir = os.path.abspath(working_dir)
         self.permission_mode = permission_mode
-        self.model = model
         self._running = True
 
         # Resolve Slack user tokens (xoxc + xoxd cookie)
@@ -244,6 +294,13 @@ class ClaudeCodeRemote:
             self.state.claude_session_id = claude_session_id
 
         self.state.working_dir = self.working_dir
+
+        # Model/effort precedence: explicit arg > persisted state > default.
+        # Persisting means a mid-session !model switch survives restarts and !spawn.
+        self.model = model or self.state.model or DEFAULT_MODEL
+        self.effort = effort or self.state.effort or DEFAULT_EFFORT
+        self.state.model = self.model
+        self.state.effort = self.effort
 
         # Our user ID (will be populated on identify)
         self.my_user_id: Optional[str] = None
@@ -453,9 +510,16 @@ class ClaudeCodeRemote:
         # 3. Final result extraction (result event at end)
         cmd = [CLAUDE_CLI, "-p", "--verbose", "--output-format", "stream-json"]
 
-        # Default to claude-opus-4-6 (1M context). Override with --model flag.
-        model = self.model or "claude-opus-4-6"
-        cmd.extend(["--model", model])
+        # --model flag overrides settings.json ANTHROPIC_MODEL; region auto-routes
+        # per model from settings.json VERTEX_REGION_CLAUDE_* vars. Switchable at
+        # runtime via !model.
+        cmd.extend(["--model", self.model or DEFAULT_MODEL])
+
+        # Explicit reasoning effort. settings.json's CLAUDE_CODE_EFFORT_LEVEL env
+        # still wins if set (that's how global max is enforced), but passing the
+        # flag keeps a sane default even if that var is ever removed.
+        if self.effort:
+            cmd.extend(["--effort", self.effort])
 
         if self.permission_mode:
             cmd.extend(["--permission-mode", self.permission_mode])
@@ -627,6 +691,12 @@ class ClaudeCodeRemote:
                 f"Next message will resume that session."
             )
 
+        if text_lower == "!model":
+            return self._model_info()
+
+        if text_lower.startswith("!model "):
+            return self._switch_model(text.strip()[7:].strip())
+
         if text_lower == "!spawn":
             return self._spawn_session()
 
@@ -675,11 +745,53 @@ class ClaudeCodeRemote:
             📋 *Remote Session:* `{self.state.session_id}`
             🧠 *Claude Session:* `{self.state.claude_session_id or 'not started'}`
             📂 *Working Dir:* `{self.working_dir}`
+            🤖 *Model:* `{self.model}`  •  🧠 *Effort:* `{self.effort}`
             💬 *Messages:* {self.state.message_count}
             🔐 *Permissions:* `{self.permission_mode}`
             ⏱️ *Interval:* {self.check_interval}s
             🕐 *Started:* {self.state.created_at[:19]}
         """)
+
+    def _resolve_model(self, name: str) -> tuple[str, bool]:
+        """Map a friendly name/alias to a full model id.
+
+        Returns (model_id, is_known). Unknown ids are still allowed through
+        (so new models work without a code change) but flagged to the user.
+        """
+        key = name.strip().lower()
+        model_id = MODEL_ALIASES.get(key, key)
+        return model_id, model_id in KNOWN_MODELS
+
+    def _model_info(self) -> str:
+        """Show the current model + how to switch."""
+        known = "  ".join(f"`{m}`" for m in KNOWN_MODELS)
+        aliases = "  ".join(f"`{a}`→`{full}`" for a, full in MODEL_ALIASES.items())
+        return textwrap.dedent(f"""\
+            {BOT_PREFIX} *Model*
+
+            *Current:* `{self.model}`  •  *Effort:* `{self.effort}`
+
+            Switch with `!model <name>` (applies to your next message):
+            *Aliases:* {aliases}
+            *Full ids:* {known}
+        """)
+
+    def _switch_model(self, name: str) -> str:
+        """Switch the model for subsequent turns (persisted across restarts)."""
+        if not name:
+            return f"{BOT_PREFIX} ❌ Usage: `!model <name>` (e.g. `!model sonnet`)"
+        model_id, is_known = self._resolve_model(name)
+        old = self.model
+        self.model = model_id
+        self.state.model = model_id
+        self.state.save()
+        note = "" if is_known else "\n⚠️ Not in the known-good list — trying anyway."
+        return (
+            f"{BOT_PREFIX} 🔀 Model switched.\n"
+            f"*From:* `{old}`\n"
+            f"*To:* `{model_id}`\n"
+            f"Applies to your next message.{note}"
+        )
 
     def _send_file(self, file_path: str) -> str:
         """Upload a file from the local machine to the Slack thread."""
@@ -824,6 +936,7 @@ class ClaudeCodeRemote:
             *Session:*
             `!status` — Info  •  `!new` — Reset  •  `!stop` — End
             `!session <id>` — Resume session  •  `!spawn` — New thread
+            `!model` — Show/switch model  •  `!model sonnet` — Switch
 
             *Files & Code:*
             `!tree` — Browse files  •  `!diff` — See changes
@@ -848,6 +961,7 @@ class ClaudeCodeRemote:
             `!new` — Fresh Claude session (clear context)
             `!session <id>` — Resume a specific Claude CLI session
             `!spawn` — Start a new remote session (new thread)
+            `!model [name]` — Show current model, or switch (e.g. `!model sonnet`)
             `!cd <path>` — Change working directory
             `!stop` — Stop the remote listener
 
@@ -881,6 +995,8 @@ class ClaudeCodeRemote:
         ]
         if self.model:
             cmd.extend(["--model", self.model])
+        if self.effort:
+            cmd.extend(["--effort", self.effort])
         if self.debug:
             cmd.append("--debug")
 
@@ -979,11 +1095,12 @@ class ClaudeCodeRemote:
 
             📂 *Working Directory:* `{self.working_dir}` ({repo_name})
             🆔 *Session:* `{self.state.session_id[:8]}...`
+            🤖 *Model:* `{self.model}`  •  🧠 *Effort:* `{self.effort}`
             🔐 *Permissions:* `{self.permission_mode}`
             🕐 *Started:* {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
 
             Reply in this thread to talk to Claude.
-            Type `!help` for commands.
+            Type `!help` for commands  •  `!model` to switch model.
         """)
 
     def _drain_queue(self, first_item: tuple) -> tuple[str, list[str]]:
@@ -1366,7 +1483,20 @@ def main():
         "--model",
         "-m",
         default=None,
-        help="Claude model (e.g. 'sonnet', 'opus'). Default: settings.json",
+        help=(
+            "Claude model — alias ('opus', 'sonnet', 'haiku') or full id "
+            f"(e.g. 'claude-sonnet-5'). Default: {DEFAULT_MODEL}. "
+            "Switch at runtime with !model."
+        ),
+    )
+    parser.add_argument(
+        "--effort",
+        default=None,
+        help=(
+            "Reasoning effort (max|xhigh|high|medium|low). "
+            f"Default: {DEFAULT_EFFORT}. Note: settings.json "
+            "CLAUDE_CODE_EFFORT_LEVEL overrides this if set."
+        ),
     )
     parser.add_argument(
         "--permission-mode",
@@ -1418,6 +1548,7 @@ def main():
             debug=args.debug,
             permission_mode=args.permission_mode,
             model=args.model,
+            effort=args.effort,
         )
         remote.start()
     except KeyboardInterrupt:
